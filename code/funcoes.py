@@ -120,3 +120,68 @@ def idw_all_vectorized(daily_rain, dist_matrix, threshold, alpha):
         return None
 
     return pd.DataFrame(results)
+
+def idw_all_clustered(daily_rain, dist_matrix, threshold, alpha, clusters, cluster_bonus_factor=2):
+    """
+    Calculates IDW for all gauges, giving preference to gauges in the same cluster.
+
+    clusters: A pandas Series with cluster labels for each gauge ID.
+    cluster_bonus_factor: Factor by which to divide the distance for same-cluster gauges.
+    """
+    # Find gauges with valid data for this day
+    valid_gauges = daily_rain.dropna()
+    valid_ids = valid_gauges.index
+
+    if len(valid_ids) < 2:
+        return None
+
+    sub_dist_matrix = dist_matrix.loc[valid_ids, valid_ids]
+    sub_clusters = clusters[valid_ids]
+
+    results = []
+
+    for unknown_id in valid_ids:
+        real_value = valid_gauges[unknown_id]
+        unknown_cluster = sub_clusters[unknown_id]
+
+        known_ids = valid_ids.drop(unknown_id)
+        if known_ids.empty:
+            continue
+
+        distances = sub_dist_matrix.loc[unknown_id, known_ids].copy()
+
+        # Apply cluster bonus
+        same_cluster_ids = sub_clusters[sub_clusters == unknown_cluster].index.intersection(known_ids)
+        distances.loc[same_cluster_ids] /= cluster_bonus_factor
+
+        # Apply radius filter (on original distances)
+        gauges_in_radius = sub_dist_matrix.loc[unknown_id, known_ids][sub_dist_matrix.loc[unknown_id, known_ids] < threshold]
+
+        # If no gauges are within the radius, skip
+        if gauges_in_radius.empty:
+            continue
+
+        # We use the gauges in radius, but with the cluster-adjusted distances
+        adjusted_distances_in_radius = distances.loc[gauges_in_radius.index]
+        known_rains = valid_gauges[gauges_in_radius.index]
+
+        # Calculate IDW using adjusted distances
+        with np.errstate(divide='ignore'):
+            weights = 1.0 / np.power(adjusted_distances_in_radius, alpha)
+
+        if np.isinf(weights).any():
+            idw_value = known_rains[weights == np.inf].values[0]
+        else:
+            idw_value = np.sum(weights * known_rains) / np.sum(weights)
+
+        results.append({
+            'unknown_id': unknown_id,
+            'idw_value': idw_value,
+            'real_value': real_value,
+            'n_gauges_used': len(gauges_in_radius)
+        })
+
+    if not results:
+        return None
+
+    return pd.DataFrame(results)
