@@ -1,188 +1,107 @@
 #!/usr/bin/env python3
 # coding: utf-8
 
-# In[ ]:
-import pandas as pd  
+import pandas as pd
 import numpy as np
-import math
-from datetime import datetime
-from IPython.display import display, HTML
 import sys
-from funcoes import *
-from IPython.core.interactiveshell import InteractiveShell  
-InteractiveShell.ast_node_interactivity = "all"
+from funcoes import create_distance_matrix, idw_all_vectorized
+import time
 
-pd.set_option('display.max_columns', None)
-pd.set_option('display.max_colwidth', None)
+def main():
+    """
+    Main function to run the IDW interpolation and sMAPE calculation.
+    """
+    if len(sys.argv) != 6:
+        print('Usage: python method_IDW+.py <threshold> <alpha> <coord_file> <rain_file> <output_file_prefix>')
+        sys.exit(1)
 
+    # Command-line arguments
+    threshold = int(sys.argv[1])
+    alpha = int(sys.argv[2])
+    coord_gauges_file = sys.argv[3]
+    rainfall_data_file = sys.argv[4]
+    output_prefix = sys.argv[5]
 
-if len(sys.argv) < 3:
-    print('Use: idw threshold alpha')
-    exit(0)
-
-threshold = int(sys.argv[1]) 
-alpha  = int(sys.argv[2])
-
-# In[ ]:
-
-
-#dict with coordinates
-coord_gauges = '/home/mary/mc/IDW method/estacoes_planicie.xlsx'
-df_coord = pd.read_excel(coord_gauges)
-#df_coord = df_coord.drop(['Name'], axis=1)
-# transform gauge names from int to strings
-df_coord['Gauge'] = df_coord['Gauge'].astype(str)
-coords = df_coord.set_index('Gauge').T.to_dict()
-
-
-# In[ ]:
-
-
-#rainfall timeseries
-data = '/home/mary/mc/IDW method/consisted_rain_gauges_planicie.xlsx'
-gauge_data = pd.read_excel(data)
-gauge_data = gauge_data.set_index(['Date'])
-# transform gauge names from int to strings
-gauge_data.columns = [str(c) for c in gauge_data.columns]
-
-
-# In[ ]:
-
-
-filter_gauges = gauge_data.notna().dot(gauge_data.columns+',').str.rstrip(',')
-filter_gauges = pd.DataFrame(filter_gauges)
-filter_gauges.index = pd.to_datetime(filter_gauges.index)
-df = pd.DataFrame(filter_gauges).reset_index()
-groups = df.groupby(0)['Date'].apply(list).reset_index(name='dias')
-groups.columns = ['gauges', 'dias']
-#groups['dias']
-
-
-# In[ ]:
-
-
-meus_dias = ['2000-06-07', '2000-06-08']
-gauge_data.loc[gauge_data.index.isin(meus_dias)]
-
-
-# In[ ]:
-
-
-dfs = []
-for dias in groups['dias']:
-    meus_dias = [dia.strftime("%Y-%m-%d") for dia in dias]
-    df = gauge_data.loc[gauge_data.index.isin(meus_dias)]
-    dfs.append(df)
-
-
-# In[ ]:
-
-
-# get the names of gauges w/ values at each line of gauge_data
-filter_gauges = gauge_data.notna().dot(gauge_data.columns+',').str.rstrip(',')
-dfs = pd.DataFrame(filter_gauges)
-
-
-# In[ ]:
-
-
-gauge_data
-
-
-# In[ ]:
-
-
-mylist = filter_gauges.values.tolist()
-gauge_list = []
-for l in mylist:
-    gauge_list.append(l.split(','))
-dfinho = pd.DataFrame(gauge_list)
-
-
-# In[ ]:
-
-
-lista2 = []
-# percorrendo cada linha de instante de tempo de chuva
-for i, list_gauges in enumerate(gauge_list):
-    # pegando lista de chuvas nao nulas
-    rainfall_values = gauge_data.iloc[i].dropna().tolist()
-    # se tiver chuva em apenas uma estacao, nao precisa interpolar
-    if len(rainfall_values)<2:
-        continue
+    # Load and prepare coordinates data
+    try:
+        df_coord = pd.read_excel(coord_gauges_file)
+        df_coord['Gauge'] = df_coord['Gauge'].astype(str)
+        df_coord = df_coord.set_index('Gauge')
         
-    final_idw = idw_all(list_gauges, rainfall_values, threshold, coords, alpha)
-    lista2.append(final_idw)
+        # FIX: The lat and lon columns are swapped in the source file.
+        # Let's check if they exist before swapping.
+        if 'lat' in df_coord.columns and 'lon' in df_coord.columns:
+            df_coord.rename(columns={'lat': 'lon_temp', 'lon': 'lat'}, inplace=True)
+            df_coord.rename(columns={'lon_temp': 'lon'}, inplace=True)
+        else: # If they are named Latitude/Longitude
+             df_coord.rename(columns={'Latitude': 'lon_temp', 'Longitude': 'lat'}, inplace=True)
+             df_coord.rename(columns={'lon_temp': 'lon'}, inplace=True)
+
+    except FileNotFoundError:
+        print(f"Error: Coordinate file not found at {coord_gauges_file}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error loading or processing coordinate file: {e}")
+        sys.exit(1)
 
 
-# In[ ]:
+    # Load and prepare rainfall data
+    try:
+        gauge_data = pd.read_excel(rainfall_data_file)
+        gauge_data = gauge_data.set_index(['Date'])
+        gauge_data.columns = [str(c) for c in gauge_data.columns]
+        gauge_data.index = pd.to_datetime(gauge_data.index)
+    except FileNotFoundError:
+        print(f"Error: Rainfall data file not found at {rainfall_data_file}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error loading or processing rainfall data file: {e}")
+        sys.exit(1)
 
+    print("Data loaded successfully. Starting computation...")
+    start_time = time.time()
 
-lista2 = pd.DataFrame(lista2)
-lista2 = lista2.rename(columns = {0: 'idw_values', 1: 'gauges', 2: 'unknow_id', 3: 'real_values'})
+    # Pre-compute the distance matrix
+    dist_matrix = create_distance_matrix(df_coord)
 
+    # Apply the vectorized IDW function to each row (day) of the rainfall data
+    daily_results = gauge_data.apply(
+        lambda row: idw_all_vectorized(row, dist_matrix, threshold, alpha),
+        axis=1
+    )
 
-# In[ ]:
+    # Filter out empty results and concatenate the rest into a single DataFrame
+    valid_results = [res for res in daily_results if res is not None]
+    if not valid_results:
+        print("No valid data to process. Exiting.")
+        sys.exit(0)
 
+    results_df = pd.concat(valid_results)
 
-lista2['n_gauges'] = lista2['gauges'].apply(count_gauges)
+    # Vectorized sMAPE calculation
+    results_df['erro_abs'] = (results_df['idw_value'] - results_df['real_value']).abs()
+    results_df['erro_rel'] = results_df['idw_value'] + results_df['real_value']
 
+    # Group by the number of gauges used and calculate sMAPE
+    sMAPE_df = results_df.groupby('n_gauges_used').agg(
+        total_erro_abs=('erro_abs', 'sum'),
+        total_erro_rel=('erro_rel', 'sum')
+    ).reset_index()
 
-# In[ ]:
+    # Calculate final sMAPE score, handle division by zero
+    sMAPE_df['sMAPE'] = sMAPE_df['total_erro_abs'] / sMAPE_df['total_erro_rel']
+    sMAPE_df.loc[sMAPE_df['total_erro_rel'] == 0, 'sMAPE'] = 0 # Define sMAPE as 0 if sum is 0
 
+    end_time = time.time()
+    print(f"Computation finished in {end_time - start_time:.2f} seconds.")
 
-def sMAE(sim, obs):
-    lista_errors = []
-    for s, o in zip(sim, obs):
-        lista_errors.append(abs(o-s))
-    return lista_errors
+    # Save the results to an Excel file
+    output_filename = f"{output_prefix}_{alpha}_{threshold}_sMAPE.xlsx"
+    try:
+        sMAPE_df.to_excel(output_filename, index=False)
+        print(f"Results saved to {output_filename}")
+    except Exception as e:
+        print(f"Error saving results to file: {e}")
 
-def calc_sMAE(x):
-    return sMAE(x['idw_values'], x['real_values'])
-
-def sMAPEabs(sim, obs):
-    lista_errors = []
-    for s, o in zip(sim, obs):
-        lista_errors.append(abs(o-s))
-    return lista_errors
-
-def sMAPErel(sim, obs):
-    lista_errors = []
-    for s, o in zip(sim, obs):
-        lista_errors.append(o+s)
-    return lista_errors
-
-def calc_sMAPEabs(x):
-    return sMAPEabs(x['idw_values'], x['real_values'])
-
-def calc_sMAPErel(x):
-    return sMAPErel(x['idw_values'], x['real_values'])
-
-lista2['erro_abs'] = lista2.apply(lambda x: calc_sMAPEabs(x), axis=1)
-lista2['erro_rel'] = lista2.apply(lambda x: calc_sMAPErel(x), axis=1)
-
-
-def convert2tuple(x):
-    tuplinha = []
-    for qtde, erro_abs, erro_rel, erro in zip(x['n_gauges'], x['erro_abs'], x['erro_rel'],  x['erro_rel']):
-        tuplinha.append((qtde, erro_abs, erro_rel, erro))
-    return tuplinha
-
-lista2['dicio'] = lista2.apply(lambda x: convert2tuple(x), axis=1)
-
-
-
-df = lista2[['dicio']].explode('dicio').reset_index().drop('index', axis=1)
-
-
-
-df[['qtde','erro_abs','erro_rel','erro']] = pd.DataFrame(df['dicio'].tolist(), index=df.index)
-df2 = df.drop('dicio', axis=1)
-#erro = df2.to_excel('planalto_'+str(alpha)+'_'+str(threshold)+'_'+'erro.xlsx', index = False)
-
-sMAPE = pd.DataFrame(df2.groupby('qtde').sum().reset_index())
-sMAPE['erro'] = sMAPE['erro_abs']/sMAPE['erro_rel']
-sMAPE
-sMAPE = sMAPE.to_excel('planicie_'+str(alpha)+'_'+str(threshold)+'_'+'sMAPE.xlsx',index = False)
-
-
+if __name__ == '__main__':
+    main()

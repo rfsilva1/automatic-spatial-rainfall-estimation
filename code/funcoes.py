@@ -1,131 +1,122 @@
 import math
 import numpy as np
+import pandas as pd
 
 import logging as logger
 fmt = "%(filename)s:%(lineno)s - %(funcName)s() - %(message)s"
 logger.basicConfig(filename='idw.log', level=logger.DEBUG, format=fmt)
 
-def calc_distance(lon1, lat1, lon2, lat2):
+def haversine_distance(lon1, lat1, lon2, lat2):
     """
-    source: rafatieppo 
-    lon, lat: longitude and latitude in decimal degrees
-    return the distance between two coordinates in km
+    Calculate the great circle distance in kilometers between two points
+    on the earth (specified in decimal degrees).
+    Vectorized version that supports broadcasting.
     """
-    rad = math.pi / 180  # degree to radian
-    R = 6378.1  # earth average radius at equador (km)
-    dlon = (lon2 - lon1) * rad
-    dlat = (lat2 - lat1) * rad
-    a = (math.sin(dlat / 2)) ** 2 + math.cos(lat1 * rad) * \
-        math.cos(lat2 * rad) * (math.sin(dlon / 2)) ** 2
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    d = R * c
-    return d
+    lon1, lat1, lon2, lat2 = map(np.radians, [lon1, lat1, lon2, lat2])
 
-def get_coord_by_id(id, coords):
-    """
-    id: gauge name
-    coords: file with gauge names and respective coordinates
-    return the gauge coordinates
-    """
-    return coords[id]['lat'], coords[id]['lon']
+    R = 6378.1  # Using the same Earth radius as the original script
 
-def get_coord_by_ids(ids, coords):
-    """
-    ids: list with gauge names 
-    coods: file with gauge names and respective coordinates
-    return the coordinates by gauge name
-    """
-    lat_list, lon_list = [], []
-    for id in ids:
-        lat, lon = get_coord_by_id(id, coords)
-        lat_list.append(lat)
-        lon_list.append(lon)
-    return lat_list, lon_list
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
 
-def idw(x, y, orig_rain, xi, yi, alpha):
-    """
-    x: latitude vector of known points
-    y: longitude vector of known points
-    orig_rain: vector w/ rainfall values of the known gauges
-    xi: latitude vector of unknown points
-    yi: longitude vector of unknown points
-    return the interpolated rainfall value
-    """
-    idw_rain = []
-    idw_only_rain = []
-    lst_dist = []
+    a = np.sin(dlat/2.0)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2.0)**2
+    c = 2 * np.arcsin(np.sqrt(a))
+    km = R * c
+    return km
 
-    for s in range(len(x)):
-        d = calc_distance(x[s], y[s], xi, yi)
-        lst_dist.append(d)
-    
-    sumsup = list((1 / np.power(lst_dist, alpha)))
-    suminf = np.sum(sumsup)
-
-    sumsup = np.sum(np.array(sumsup) * np.array(orig_rain))
-    u = sumsup / suminf
-    return u
-
-def radius_filter(gauges, rainfall, unknow_lat, unknow_lon, threshold, coords):
+def create_distance_matrix(coords_df):
     """
-    function that selects gauges that are within a defined distance radius
-    return the coordinates, rainfall values and ids of gauges that are inside the threshold
+    Creates a distance matrix between all gauges using numpy broadcasting.
+    coords_df: pandas DataFrame with 'lat' and 'lon' columns and gauge IDs as index.
+    Returns a DataFrame with the distance matrix.
     """
-    ids_usados, new_lat_list, new_lon_list, new_rainfall = [],[],[],[]
-    lat_list, lon_list = get_coord_by_ids(gauges, coords)
-    for id, lat, lon, rain in zip(gauges, lat_list, lon_list, rainfall):
-        distance = calc_distance(lat, lon, unknow_lat, unknow_lon)
-#         print('distancia', distance)
-        if distance < threshold:
-            new_lat_list.append(lat)
-            new_lon_list.append(lon)
-            new_rainfall.append(rain)
-            ids_usados.append(id)
-    return new_lat_list, new_lon_list, new_rainfall, ids_usados
+    station_ids = coords_df.index
+    lats = coords_df['lat'].values
+    lons = coords_df['lon'].values
 
-def get_original_values(list_gauges, list_rain):
-    return list_gauges.copy(), list_rain.copy()
+    # Reshape for broadcasting
+    lats1 = lats[:, np.newaxis]
+    lons1 = lons[:, np.newaxis]
+    lats2 = lats[np.newaxis, :]
+    lons2 = lons[np.newaxis, :]
 
-def idw_all(list_gauges, list_rain, threshold, coords, alpha):
+    # Calculate all distances at once
+    distances = haversine_distance(lons1, lats1, lons2, lats2)
+
+    dist_matrix = pd.DataFrame(distances, index=station_ids, columns=station_ids)
+    return dist_matrix
+
+def idw_all_vectorized(daily_rain, dist_matrix, threshold, alpha):
     """
-    function to calculate IDW for each line, switching each gauge as the unknown point at a time
-    """
-    lista_values = []
-    lista_ids_usados = []
-    lista_ids_unknows = []
-    lista_rainfall_real = []
-    # makes combinations to select the unknown point
-    for id, rain in zip (list_gauges, list_rain):
-#         print('========================================================')
-        gauges, rainfall = get_original_values(list_gauges, list_rain)
-        gauges.remove(id)
-        rainfall.remove(rain)
-        lat_list, lon_list = get_coord_by_ids(gauges, coords)
-        unknow_lat, unknow_lon = get_coord_by_id(id, coords)
-#         print('lat_list completa', lat_list)
-#         print('lon_list completa', lon_list)
-#         print('rainfall completa', rainfall)
-#         print('ids completos', gauges)
+    Calculates IDW for all gauges in a vectorized manner for a single day.
 
-        lat_list, lon_list, rainfall, ids_usados = radius_filter(gauges, rainfall, unknow_lat, unknow_lon, threshold, coords)
+    daily_rain: A pandas Series with rainfall data for one day. Index is gauge ID.
+    dist_matrix: A pre-computed pandas DataFrame with distances between all gauges.
+    threshold: The radius distance to consider gauges from.
+    alpha: The exponent for IDW.
 
-#         print('lon_list novo', lon_list)
-#         print('rainfall novo', rainfall)
-#         print('ids novo', ids_usados)
-        if lat_list:
-            value = idw(lat_list, lon_list, rainfall, unknow_lat, unknow_lon, alpha)
-    #         print('idw:', value)
-            lista_values.append(value)
-            lista_ids_usados.append(ids_usados)
-            lista_ids_unknows.append(id)
-            lista_rainfall_real.append(rain)
-    return lista_values, lista_ids_usados, lista_ids_unknows, lista_rainfall_real
+    Returns a DataFrame with 'idw_value', 'real_value', and 'n_gauges_used'.
+    """
+    # Find gauges with valid data for this day
+    valid_gauges = daily_rain.dropna()
+    valid_ids = valid_gauges.index
 
-def count_gauges(x):
-    """
-    count the number of gauges used to obtain the correspondent idw value
-    """
-    lista = []
-    for i in x:
-        lista.append(len(i))
-    return lista
+    # If less than 2 gauges have data, we can't interpolate
+    if len(valid_ids) < 2:
+        return None
+
+    # Subset the distance matrix for valid gauges
+    sub_dist_matrix = dist_matrix.loc[valid_ids, valid_ids]
+
+    # Prepare results list
+    results = []
+
+    # Loop through each gauge to treat it as the unknown point
+    for unknown_id in valid_ids:
+
+        # Get real rainfall value for the unknown gauge
+        real_value = valid_gauges[unknown_id]
+
+        # Known points are all other valid gauges
+        known_ids = valid_ids.drop(unknown_id)
+
+        # If no other gauges, cannot interpolate
+        if known_ids.empty:
+            continue
+
+        # Get distances from the unknown gauge to all known gauges
+        distances = sub_dist_matrix.loc[unknown_id, known_ids]
+
+        # Apply radius filter
+        gauges_in_radius = distances[distances < threshold]
+
+        # If no gauges are within the radius, skip
+        if gauges_in_radius.empty:
+            continue
+
+        # Get rainfall values for the gauges in the radius
+        known_rains = valid_gauges[gauges_in_radius.index]
+
+        # Calculate IDW
+        # Handle cases where distance is zero to avoid division by zero
+        with np.errstate(divide='ignore'):
+            weights = 1.0 / np.power(gauges_in_radius, alpha)
+
+        # If a known point is at the same location as the unknown point, its weight will be inf.
+        # In this case, the interpolated value is simply the value of that known point.
+        if np.isinf(weights).any():
+            idw_value = known_rains[weights == np.inf].values[0]
+        else:
+            idw_value = np.sum(weights * known_rains) / np.sum(weights)
+
+        results.append({
+            'unknown_id': unknown_id,
+            'idw_value': idw_value,
+            'real_value': real_value,
+            'n_gauges_used': len(gauges_in_radius)
+        })
+
+    if not results:
+        return None
+
+    return pd.DataFrame(results)
